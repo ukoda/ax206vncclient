@@ -6,6 +6,10 @@ Being lazy I have simply forked the LibVNCServer library and added my needed cli
 
 The reset of this readme is from the upstream project.
 
+If you need gdb to work try "cmake -DCMAKE_BUILD_TYPE=Debug --build ." before the normal "cmake --build .".
+
+NB: This is a working progress.  While it builds ax206vncclient it is not functional yet.
+
 Original README
 ===============
 

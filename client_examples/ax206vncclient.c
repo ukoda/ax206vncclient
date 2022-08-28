@@ -1,0 +1,500 @@
+
+/*
+ * Copyright (C) 2021 David Annett david@annett.co.nz
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330,
+ * Boston, MA 02111-1307, USA.
+ */
+
+#include <stdlib.h>
+#include <rfb/rfbclient.h>
+#include <stdbool.h>
+#include "libusb-1.0/libusb.h"
+
+// VNC stuff
+
+static rfbClient *cl;
+static bool framebuffer_allocated = FALSE;
+
+
+static void ErrorLog (const char *format, ...);
+static void DefaultLog (const char *format, ...);
+
+
+
+// USB display stuff
+
+#define DPFAXHANDLE void *      // Handle needed for dpf_ax access
+#define DPF_BPP 2               //bpp for dfp-ax is currently always 2!
+
+// Convert RGBA pixel to RGB565 pixel(s)
+
+#define _RGB565_0(p) (( ((p.R) & 0xf8)      ) | (((p.G) & 0xe0) >> 5))
+#define _RGB565_1(p) (( ((p.G) & 0x1c) << 3 ) | (((p.B) & 0xf8) >> 3))
+
+
+#define AX206_VID 0x1908        // Hacked frames USB Vendor ID
+#define AX206_PID 0x0102        // Hacked frames USB Product ID
+
+#define USBCMD_SETPROPERTY  0x01        // USB command: Set property
+#define USBCMD_BLIT         0x12        // USB command: Blit to screen
+
+/* Generic SCSI device stuff */
+
+#define DIR_IN  0
+#define DIR_OUT 1
+
+typedef struct {
+    unsigned char R;
+    unsigned char G;
+    unsigned char B;
+    unsigned char A;
+} RGBA;
+
+/*
+ * Dpf status
+ */
+static struct {
+    unsigned char *lcdBuf;      // Display data buffer
+    unsigned char *xferBuf;     // USB transfer buffer
+    DPFAXHANDLE dpfh;           // Handle for dpf access
+    int pwidth;                 // Physical display width
+    int pheight;                // Physical display height
+
+    // Flags to translate logical to physical orientation
+    int isPortrait;
+    int rotate90;
+    int flip;
+
+    // Current dirty rectangle
+    int minx, maxx;
+    int miny, maxy;
+
+    // Config properties
+    int orientation;
+    int backlight;
+} dpf;
+
+/* The DPF context structure */
+typedef
+    struct dpf_context {
+    libusb_device_handle *udev;
+    unsigned int width;
+    unsigned int height;
+} DPFContext;
+
+
+DPFAXHANDLE dpf_ax_open(const char *dev);
+void dpf_ax_close(DPFAXHANDLE h);
+static int wrap_scsi(DPFContext * h, unsigned char *cmd, int cmdlen, char out,
+                     unsigned char *data, unsigned long block_len);
+
+
+int DROWS, DCOLS;        /* display size */
+
+
+// USB LCD stuff
+
+/**
+ * Open DPF device.
+ * 
+ * Device must be string in the form "usbX" or "dpfX", with X = 0 .. number of connected dpfs.
+ * The open function will scan the USB bus and return a handle to access dpf #X.
+ * If dpf #X is not found, returns NULL.
+ *
+ * \param dev	device name to open
+ * \return		device handle or NULL
+ */
+DPFAXHANDLE dpf_ax_open(const char *dev)
+{
+    DPFContext *dpf;
+    int index = -1;
+    libusb_device_handle *u;
+    libusb_device **devs;
+    ssize_t cnt;
+    int r, i;
+    int enumeration = 0;
+    struct libusb_device *d = NULL;
+    struct libusb_device_descriptor desc;
+
+    if (dev && strlen(dev) == 4 && (strncmp(dev, "usb", 3) == 0 || strncmp(dev, "dpf", 3) == 0))
+        index = dev[3] - '0';
+
+    if (index < 0 || index > 9) {
+        fprintf(stderr, "dpf_ax_open: wrong device '%s'. Please specify a string like 'usb0'\n", dev);
+        return NULL;
+    }
+
+    r = libusb_init(NULL);
+    if (r < 0) {
+        fprintf(stderr, "dpf_ax_open: libusb_init failed with error %d\n", r);
+        return NULL;
+    }
+
+    cnt = libusb_get_device_list(NULL, &devs);
+    if (cnt < 0) {
+        libusb_exit(NULL);
+        fprintf(stderr, "dpf_ax_open: libusb_init failed with error %d\n", r);
+        return NULL;
+    }
+
+    for (i = 0; devs[i]; i++) {
+        r = libusb_get_device_descriptor(devs[i], &desc);
+        if (r < 0) {
+            fprintf(stderr, "dpf_ax_open: failed to get device descriptor");
+            return NULL;
+        }
+
+        if ((desc.idVendor == AX206_VID) && (desc.idProduct == AX206_PID)) {
+            fprintf(stderr, "dpf_ax_open: found AX206 #%d\n", enumeration + 1);
+            if (enumeration == index) {
+                d = devs[i];
+                break;
+            } else {
+                enumeration++;
+            }
+        }
+    }
+
+    if (!d) {
+        fprintf(stderr, "dpf_ax_open: no matching USB device '%s' found!\n", dev);
+        return NULL;
+    }
+
+    dpf = (DPFContext *) malloc(sizeof(DPFContext));
+    if (!dpf) {
+        fprintf(stderr, "dpf_ax_open: error allocation memory.\n");
+        return NULL;
+    }
+
+    r = libusb_open(d, &u);
+    if ((r != 0) || (u == NULL)) {
+        fprintf(stderr, "dpf_ax_open: failed to open usb device '%s'!\n", dev);
+        free(dpf);
+        return NULL;
+    }
+
+    libusb_free_device_list(devs, 1);
+
+    if (libusb_claim_interface(u, 0) < 0) {
+        fprintf(stderr, "dpf_ax_open: failed to claim usb device!\n");
+        libusb_close(u);
+        free(dpf);
+        return NULL;
+    }
+
+    dpf->udev = u;
+
+    static unsigned char buf[5];
+    static unsigned char cmd[16] = {
+        0xcd, 0, 0, 0,
+        0, 2, 0, 0,
+        0, 0, 0, 0,
+        0, 0, 0, 0
+    };
+    cmd[5] = 2;                 // get LCD parameters
+    if (wrap_scsi(dpf, cmd, sizeof(cmd), DIR_IN, buf, 5) == 0) {
+        dpf->width = (buf[0]) | (buf[1] << 8);
+        dpf->height = (buf[2]) | (buf[3] << 8);
+        fprintf(stderr, "dpf_ax_open: got LCD dimensions: %dx%d\n", dpf->width, dpf->height);
+    } else {
+        fprintf(stderr, "dpf_ax_open: error reading LCD dimensions!\n");
+        dpf_ax_close(dpf);
+        return NULL;
+    }
+    return (DPFAXHANDLE) dpf;
+}
+
+/**
+ *  Close DPF device
+ */
+
+void dpf_ax_close(DPFAXHANDLE h)
+{
+    DPFContext *dpf = (DPFContext *) h;
+
+    libusb_release_interface(dpf->udev, 0);
+    libusb_close(dpf->udev);
+    free(dpf);
+}
+
+
+
+static unsigned char g_buf[] = {
+    0x55, 0x53, 0x42, 0x43,     // dCBWSignature
+    0xde, 0xad, 0xbe, 0xef,     // dCBWTag
+    0x00, 0x80, 0x00, 0x00,     // dCBWLength
+    0x00,                       // bmCBWFlags: 0x80: data in (dev to host), 0x00: Data out
+    0x00,                       // bCBWLUN
+    0x10,                       // bCBWCBLength
+
+    // SCSI cmd:
+    0xcd, 0x00, 0x00, 0x00,
+    0x00, 0x06, 0x11, 0xf8,
+    0x70, 0x00, 0x40, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+};
+
+#define ENDPT_OUT 1
+#define ENDPT_IN 0x81
+
+static int wrap_scsi(DPFContext * h, unsigned char *cmd, int cmdlen, char out,
+                     unsigned char *data, unsigned long block_len)
+{
+    int len;
+    int transfered;
+    int ret;
+    static unsigned char ansbuf[13];    // Do not change size.
+
+    g_buf[14] = cmdlen;
+    memcpy(&g_buf[15], cmd, cmdlen);
+
+    g_buf[8] = block_len;
+    g_buf[9] = block_len >> 8;
+    g_buf[10] = block_len >> 16;
+    g_buf[11] = block_len >> 24;
+
+    ret = libusb_bulk_transfer(h->udev, ENDPT_OUT, g_buf, sizeof(g_buf), &transfered, 1000);
+    if (ret != 0)
+        return ret;
+
+    if (out == DIR_OUT) {
+        if (data) {
+            ret = libusb_bulk_transfer(h->udev, ENDPT_OUT, data, block_len, &transfered, 3000);
+            if ((ret != 0) || (transfered != (int) block_len)) {
+                fprintf(stderr, "dpf_ax ERROR: bulk write.\n");
+                return ret;
+            }
+        }
+    } else if (data) {
+        ret = libusb_bulk_transfer(h->udev, ENDPT_IN, data, block_len, &transfered, 4000);
+        if ((ret != 0) || (transfered != (int) block_len)) {
+            fprintf(stderr, "dpf_ax ERROR: bulk read.\n");
+            return ret;
+        }
+    }
+    // get ACK:
+    len = sizeof(ansbuf);
+    int retry = 0;
+    int timeout = 0;
+    do {
+        timeout = 0;
+        ret = libusb_bulk_transfer(h->udev, ENDPT_IN, ansbuf, len, &transfered, 5000);
+        if ((ret != 0) || (transfered != (int) len)) {
+            fprintf(stderr, "dpf_ax ERROR: bulk ACK read. ret = %d transfered = %d expected %d\n", ret, transfered,
+                    len);
+            timeout = 1;
+        }
+        retry++;
+    } while (timeout && retry < 5);
+    if (strncmp((char *) ansbuf, "USBS", 4)) {
+        fprintf(stderr, "dpf_ax ERROR: got invalid reply\n.");
+        return -1;
+    }
+    // pass back return code set by peer:
+    return ansbuf[12];
+}
+
+
+// VNC stuff
+
+static void got_cut_text (rfbClient *cl, const char *text, int textlen)
+{
+	DefaultLog("got_cut_text\n");
+}
+
+static void kbd_leds (rfbClient *cl, int value, int pad) {
+	DefaultLog("kbd_leds\n");
+}
+
+static void text_chat (rfbClient *cl, int value, char *text) {
+	DefaultLog("text_chat\n");
+}
+
+static char * get_password (rfbClient *client)
+{
+	char *password;
+
+	DefaultLog("get_password\n");
+	password = NULL;
+	return password;
+}
+
+
+
+/*
+static void request_screen_refresh (GtkMenuItem *menuitem,
+                                    gpointer     user_data)
+{
+	SendFramebufferUpdateRequest (cl, 0, 0, cl->width, cl->height, FALSE);
+}
+*/
+
+static rfbBool resize (rfbClient *client) {
+	static char first=TRUE;
+	int tmp_width, tmp_height;
+
+	if (first) {
+		first=FALSE;
+		DefaultLog("resize first %d x %d\n", client->width, client->height);
+		client->frameBuffer = malloc(client->width * client->height * 4);
+	} else {
+		DefaultLog("resize later %d x %d\n", client->width, client->height);
+		free(client->frameBuffer);
+		client->frameBuffer = malloc(client->width * client->height * 4);
+	}
+	return TRUE;
+}
+
+
+
+static void update (rfbClient *cl, int x, int y, int w, int h) {
+	DefaultLog("*** update x=%d, y=%d, w=%d, h=%d ***\n", x, y, w, h);
+	DefaultLog("frameBuffer: %02x %02x %02x %02x %02x %02x %02x %02x\n",
+	  cl->frameBuffer[490], cl->frameBuffer[491], cl->frameBuffer[492], cl->frameBuffer[493],
+	  cl->frameBuffer[494], cl->frameBuffer[495], cl->frameBuffer[496], cl->frameBuffer[497]);
+//	  cl->frameBuffer[0], cl->frameBuffer[1], cl->frameBuffer[2], cl->frameBuffer[3],
+//	  cl->frameBuffer[4], cl->frameBuffer[5], cl->frameBuffer[6], cl->frameBuffer[7]);
+/*	
+	DefaultLog("buffer: %02x %02x %02x %02x %02x %02x %02x %02x\n",
+	  cl->buffer[0], cl->buffer[1], cl->buffer[2], cl->buffer[3], cl->buffer[4], cl->buffer[5], cl->buffer[6], cl->buffer[7]);
+*/	  
+
+/*
+	if (dialog_connecting != NULL) {
+		gtk_widget_destroy (dialog_connecting);
+		dialog_connecting = NULL;
+	}
+
+	GtkWidget *drawing_area = rfbClientGetClientData (cl, gtk_init);
+
+	if (drawing_area != NULL)
+		gtk_widget_queue_draw_area (drawing_area, x, y, w, h);
+*/		
+}
+
+
+
+static void ErrorLog (const char *format, ...)
+{
+	va_list args;
+	char buf[256];
+	time_t log_clock;
+
+	va_start (args, format);
+
+	time (&log_clock);
+	strftime (buf, 255, "%d/%m/%Y %X Error: ", localtime (&log_clock));
+	fprintf (stderr, "%s", buf);
+
+	vfprintf (stderr, format, args);
+	fflush (stderr);
+
+	va_end (args);
+}
+
+
+
+static void DefaultLog (const char *format, ...)
+{
+	va_list args;
+	char buf[256];
+	time_t log_clock;
+
+	va_start (args, format);
+
+	time (&log_clock);
+	strftime (buf, 255, "%d/%m/%Y %X Log:   ", localtime (&log_clock));
+	fprintf (stdout, "%s", buf);
+
+	vfprintf (stdout, format, args);
+	fflush (stdout);
+
+	va_end (args);
+}
+
+
+
+int main (int argc, char *argv[])
+{
+	int i;
+	bool debug;
+
+//	GdkImage *image;
+
+	rfbClientLog = DefaultLog;
+	rfbClientErr = ErrorLog;
+
+//	gtk_init (&argc, &argv);
+
+	/* create a dummy image just to make use of its properties */
+/*	
+	image = gdk_image_new (GDK_IMAGE_FASTEST, gdk_visual_get_system(),
+				200, 100);
+*/
+	cl = rfbGetClient (8, 3, 4);  // TODO: Work out the correct values we need
+/*
+	cl->format.redShift     = image->visual->red_shift;
+	cl->format.greenShift   = image->visual->green_shift;
+	cl->format.blueShift    = image->visual->blue_shift;
+
+	cl->format.redMax   = (1 << image->visual->red_prec) - 1;
+	cl->format.greenMax = (1 << image->visual->green_prec) - 1;
+	cl->format.blueMax  = (1 << image->visual->blue_prec) - 1;
+
+	g_object_unref (image);
+*/
+	cl->MallocFrameBuffer = resize;
+	cl->canHandleNewFBSize = FALSE;
+	cl->GotFrameBufferUpdate = update;
+	cl->GotXCutText = got_cut_text;
+	cl->HandleKeyboardLedState = kbd_leds;
+	cl->HandleTextChat = text_chat;
+	cl->GetPassword = get_password;
+
+//	show_connect_window (argc, argv);
+
+	if (!rfbInitClient (cl, &argc, argv))
+		return 1;
+
+
+	debug = true;
+	while (1) {
+//		DefaultLog("WaitForMessage\n");
+/*		
+		while (gtk_events_pending ())
+			gtk_main_iteration ();
+*/			
+		i = WaitForMessage (cl, 500);
+		if (debug) {
+  		debug = false;
+  	}
+		if (i < 0) {
+			DefaultLog("Exiting because i = %d\n", i);
+			return 1;
+		}
+		if (i)
+//		if (i && framebuffer_allocated == TRUE)
+			if (!HandleRFBServerMessage(cl)) {
+  			DefaultLog("Exiting because HandleRFBServerMessage() unhappy\n");
+				return 2;
+			}
+	}
+
+//	gtk_main ();
+
+	return 0;
+}
+

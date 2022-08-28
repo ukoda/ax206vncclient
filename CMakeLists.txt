@@ -63,6 +63,7 @@ option(WITH_EXAMPLES "Build examples" ON)
 option(WITH_TESTS "Build tests" ON)
 
 
+find_package(libusb-1.0 REQUIRED)
 
 if(WITH_ZLIB)
   find_package(ZLIB)
@@ -586,6 +587,7 @@ if(ANDROID)
 endif(ANDROID)
 
 set(LIBVNCCLIENT_EXAMPLES
+    ax206vncclient
     backchannel
     ppmtest
 )
@@ -637,7 +639,7 @@ if(WITH_EXAMPLES)
     add_executable(client_examples_${e} ${LIBVNCCLIEXAMPLE_DIR}/${e}.c ${LIBVNCCLIEXAMPLE_DIR}/${${e}_EXTRA_SOURCES} )
     set_target_properties(client_examples_${e} PROPERTIES OUTPUT_NAME ${e})
     set_target_properties(client_examples_${e} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/client_examples)
-    target_link_libraries(client_examples_${e} vncclient ${CMAKE_THREAD_LIBS_INIT} ${SDL2_LIBRARY} ${GTK2_LIBRARIES} ${FFMPEG_LIBRARIES} ${LIBSSH2_LIBRARY})
+    target_link_libraries(client_examples_${e} vncclient ${LIBUSB_1_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT} ${SDL2_LIBRARY} ${GTK2_LIBRARIES} ${FFMPEG_LIBRARIES} ${LIBSSH2_LIBRARY})
   endforeach(e ${LIBVNCCLIENT_EXAMPLES})
 endif(WITH_EXAMPLES)
 
