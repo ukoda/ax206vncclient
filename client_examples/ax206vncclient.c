@@ -187,11 +187,12 @@ DPFAXHANDLE dpf_ax_open(const char *dev)
     }
 
     libusb_free_device_list(devs, 1);
-
+/*
     r = libusb_detach_kernel_driver(u, 0);
     DefaultLog("dpf_ax_open: libusb_detach_kernel_driver returned %d = %s = %s\n", r, libusb_error_name(r), libusb_strerror(r));
     r = libusb_set_configuration(u, 0);
     DefaultLog("dpf_ax_open: libusb_set_configuration returned %d = %s = %s\n", r, libusb_error_name(r), libusb_strerror(r));
+*/    
     r = libusb_claim_interface(u, 0);
     if (r < 0) {
         ErrorLog("dpf_ax_open: failed to claim usb device, error %d = %s = %s\n", r, libusb_error_name(r), libusb_strerror(r));
@@ -222,10 +223,11 @@ DPFAXHANDLE dpf_ax_open(const char *dev)
     return (DPFAXHANDLE) dpf;
 }
 
+
+
 /**
  *  Close DPF device
  */
-
 void dpf_ax_close(DPFAXHANDLE h)
 {
     DPFContext *dpf = (DPFContext *) h;
@@ -233,6 +235,41 @@ void dpf_ax_close(DPFAXHANDLE h)
     libusb_release_interface(dpf->udev, 0);
     libusb_close(dpf->udev);
     free(dpf);
+}
+
+
+
+static
+unsigned char g_excmd[16] = {
+    0xcd, 0, 0, 0,
+    0, 6, 0, 0,
+    0, 0, 0, 0,
+    0, 0, 0, 0
+};
+
+/** Blit data to screen.
+ *
+ * \param buf     buffer to 16 bpp RGB 565 image data
+ * \param rect    rectangle tuple: [x0, y0, x1, y1]
+ */
+void dpf_ax_screen_blit(DPFAXHANDLE h, const unsigned char *buf, short rect[4])
+{
+    unsigned long len = (rect[2] - rect[0]) * (rect[3] - rect[1]);
+    len <<= 1;
+    unsigned char *cmd = g_excmd;
+
+    cmd[6] = USBCMD_BLIT;
+    cmd[7] = rect[0];
+    cmd[8] = rect[0] >> 8;
+    cmd[9] = rect[1];
+    cmd[10] = rect[1] >> 8;
+    cmd[11] = rect[2] - 1;
+    cmd[12] = (rect[2] - 1) >> 8;
+    cmd[13] = rect[3] - 1;
+    cmd[14] = (rect[3] - 1) >> 8;
+    cmd[15] = 0;
+
+    wrap_scsi((DPFContext *) h, cmd, sizeof(g_excmd), DIR_OUT, (unsigned char *) buf, len);
 }
 
 
@@ -366,12 +403,14 @@ static rfbBool resize (rfbClient *client) {
 
 
 static void update (rfbClient *cl, int x, int y, int w, int h) {
+/*
 	DefaultLog("*** update x=%d, y=%d, w=%d, h=%d ***\n", x, y, w, h);
 	DefaultLog("frameBuffer: %02x %02x %02x %02x %02x %02x %02x %02x\n",
 	  cl->frameBuffer[490], cl->frameBuffer[491], cl->frameBuffer[492], cl->frameBuffer[493],
 	  cl->frameBuffer[494], cl->frameBuffer[495], cl->frameBuffer[496], cl->frameBuffer[497]);
 //	  cl->frameBuffer[0], cl->frameBuffer[1], cl->frameBuffer[2], cl->frameBuffer[3],
 //	  cl->frameBuffer[4], cl->frameBuffer[5], cl->frameBuffer[6], cl->frameBuffer[7]);
+*/      
 /*	
 	DefaultLog("buffer: %02x %02x %02x %02x %02x %02x %02x %02x\n",
 	  cl->buffer[0], cl->buffer[1], cl->buffer[2], cl->buffer[3], cl->buffer[4], cl->buffer[5], cl->buffer[6], cl->buffer[7]);
@@ -388,6 +427,14 @@ static void update (rfbClient *cl, int x, int y, int w, int h) {
 	if (drawing_area != NULL)
 		gtk_widget_queue_draw_area (drawing_area, x, y, w, h);
 */		
+    short rect[4];
+
+    rect[0] = x;
+    rect[1] = y;
+    rect[2] = x+w;
+    rect[3] = y+h;
+    dpf_ax_screen_blit(dpf.dpfh, cl->frameBuffer, rect);
+
 }
 
 
@@ -434,22 +481,35 @@ static void DefaultLog (const char *format, ...)
 
 int main (int argc, char *argv[])
 {
-	int i;
-	bool debug;
+	int    i;
+	bool   debug;
+    int    vncargc;
+    char **vncargv;
 
 // Try to open the USB display
 
-//  dpf.dpfh = dpf_ax_open(dev);
-  dpf.dpfh = dpf_ax_open("usb3");
-  if (dpf.dpfh == NULL) {
-      ErrorLog("dpf: cannot open dpf device %s\n", "usb3"/*dev*/);
-      return -1;
-  }
+    if (argc < 2) {
+        ErrorLog("No dpf device or VNC service specified\n");
+        DefaultLog("Usage:\n");
+        DefaultLog("%s dpf server\n", argv[0]);
+        DefaultLog("e.g:\n");
+        DefaultLog("%s usb0 server.domain\n", argv[0]);
+        return -1;
+    }
+
+    dpf.dpfh = dpf_ax_open(argv[1]);
+    if (dpf.dpfh == NULL) {
+        ErrorLog("dpf: cannot open dpf device %s\n", argv[1]);
+        return -1;
+    }
+
+    vncargc = argc - 1;
+    vncargv = &argv[1];
 
 //	GdkImage *image;
 
-	rfbClientLog = DefaultLog;
-	rfbClientErr = ErrorLog;
+    rfbClientLog = DefaultLog;
+    rfbClientErr = ErrorLog;
 
 //	gtk_init (&argc, &argv);
 
@@ -480,33 +540,33 @@ int main (int argc, char *argv[])
 
 //	show_connect_window (argc, argv);
 
-	if (!rfbInitClient (cl, &argc, argv)) {
-    dpf_ax_close(dpf.dpfh);
-		return 1;
-	}
+	if (!rfbInitClient (cl, &vncargc, vncargv)) {
+        dpf_ax_close(dpf.dpfh);
+        return 1;
+    }
 
 
-	debug = true;
-	while (1) {
-		i = WaitForMessage (cl, 500);
-		if (debug) {
-  		debug = false;
-  	}
-		if (i < 0) {
-			ErrorLog("Exiting because i = %d\n", i);
-	    dpf_ax_close(dpf.dpfh);
-			return 1;
-		}
-		if (i)
+    debug = true;
+    while (1) {
+      i = WaitForMessage (cl, 500);
+      if (debug) {
+        debug = false;
+    }
+    if (i < 0) {
+       ErrorLog("Exiting because i = %d\n", i);
+       dpf_ax_close(dpf.dpfh);
+       return 1;
+   }
+   if (i)
 //		if (i && framebuffer_allocated == TRUE)
-			if (!HandleRFBServerMessage(cl)) {
-  			ErrorLog("Exiting because HandleRFBServerMessage() unhappy\n");
-		    dpf_ax_close(dpf.dpfh);
-				return 2;
-			}
-	}
+       if (!HandleRFBServerMessage(cl)) {
+         ErrorLog("Exiting because HandleRFBServerMessage() unhappy\n");
+         dpf_ax_close(dpf.dpfh);
+         return 2;
+     }
+ }
 
-  dpf_ax_close(dpf.dpfh);
-	return 0;
+ dpf_ax_close(dpf.dpfh);
+ return 0;
 }
 
