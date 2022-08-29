@@ -133,32 +133,32 @@ DPFAXHANDLE dpf_ax_open(const char *dev)
         index = dev[3] - '0';
 
     if (index < 0 || index > 9) {
-        fprintf(stderr, "dpf_ax_open: wrong device '%s'. Please specify a string like 'usb0'\n", dev);
+        ErrorLog("dpf_ax_open: wrong device '%s'. Please specify a string like 'usb0'\n", dev);
         return NULL;
     }
 
     r = libusb_init(NULL);
     if (r < 0) {
-        fprintf(stderr, "dpf_ax_open: libusb_init failed with error %d\n", r);
+        ErrorLog("dpf_ax_open: libusb_init failed with error %d\n", r);
         return NULL;
     }
 
     cnt = libusb_get_device_list(NULL, &devs);
     if (cnt < 0) {
         libusb_exit(NULL);
-        fprintf(stderr, "dpf_ax_open: libusb_init failed with error %d\n", r);
+        ErrorLog("dpf_ax_open: libusb_init failed with error %d\n", r);
         return NULL;
     }
 
     for (i = 0; devs[i]; i++) {
         r = libusb_get_device_descriptor(devs[i], &desc);
         if (r < 0) {
-            fprintf(stderr, "dpf_ax_open: failed to get device descriptor");
+            ErrorLog("dpf_ax_open: failed to get device descriptor");
             return NULL;
         }
 
         if ((desc.idVendor == AX206_VID) && (desc.idProduct == AX206_PID)) {
-            fprintf(stderr, "dpf_ax_open: found AX206 #%d\n", enumeration + 1);
+            DefaultLog("dpf_ax_open: found AX206 #%d\n", enumeration + 1);
             if (enumeration == index) {
                 d = devs[i];
                 break;
@@ -169,27 +169,32 @@ DPFAXHANDLE dpf_ax_open(const char *dev)
     }
 
     if (!d) {
-        fprintf(stderr, "dpf_ax_open: no matching USB device '%s' found!\n", dev);
+        ErrorLog("dpf_ax_open: no matching USB device '%s' found!\n", dev);
         return NULL;
     }
 
     dpf = (DPFContext *) malloc(sizeof(DPFContext));
     if (!dpf) {
-        fprintf(stderr, "dpf_ax_open: error allocation memory.\n");
+        ErrorLog("dpf_ax_open: error allocation memory.\n");
         return NULL;
     }
 
     r = libusb_open(d, &u);
     if ((r != 0) || (u == NULL)) {
-        fprintf(stderr, "dpf_ax_open: failed to open usb device '%s'!\n", dev);
+        ErrorLog("dpf_ax_open: failed to open usb device '%s'!\n", dev);
         free(dpf);
         return NULL;
     }
 
     libusb_free_device_list(devs, 1);
 
-    if (libusb_claim_interface(u, 0) < 0) {
-        fprintf(stderr, "dpf_ax_open: failed to claim usb device!\n");
+    r = libusb_detach_kernel_driver(u, 0);
+    DefaultLog("dpf_ax_open: libusb_detach_kernel_driver returned %d = %s = %s\n", r, libusb_error_name(r), libusb_strerror(r));
+    r = libusb_set_configuration(u, 0);
+    DefaultLog("dpf_ax_open: libusb_set_configuration returned %d = %s = %s\n", r, libusb_error_name(r), libusb_strerror(r));
+    r = libusb_claim_interface(u, 0);
+    if (r < 0) {
+        ErrorLog("dpf_ax_open: failed to claim usb device, error %d = %s = %s\n", r, libusb_error_name(r), libusb_strerror(r));
         libusb_close(u);
         free(dpf);
         return NULL;
@@ -208,9 +213,9 @@ DPFAXHANDLE dpf_ax_open(const char *dev)
     if (wrap_scsi(dpf, cmd, sizeof(cmd), DIR_IN, buf, 5) == 0) {
         dpf->width = (buf[0]) | (buf[1] << 8);
         dpf->height = (buf[2]) | (buf[3] << 8);
-        fprintf(stderr, "dpf_ax_open: got LCD dimensions: %dx%d\n", dpf->width, dpf->height);
+        DefaultLog("dpf_ax_open: got LCD dimensions: %dx%d\n", dpf->width, dpf->height);
     } else {
-        fprintf(stderr, "dpf_ax_open: error reading LCD dimensions!\n");
+        ErrorLog("dpf_ax_open: error reading LCD dimensions!\n");
         dpf_ax_close(dpf);
         return NULL;
     }
@@ -432,6 +437,15 @@ int main (int argc, char *argv[])
 	int i;
 	bool debug;
 
+// Try to open the USB display
+
+//  dpf.dpfh = dpf_ax_open(dev);
+  dpf.dpfh = dpf_ax_open("usb3");
+  if (dpf.dpfh == NULL) {
+      ErrorLog("dpf: cannot open dpf device %s\n", "usb3"/*dev*/);
+      return -1;
+  }
+
 //	GdkImage *image;
 
 	rfbClientLog = DefaultLog;
@@ -466,35 +480,33 @@ int main (int argc, char *argv[])
 
 //	show_connect_window (argc, argv);
 
-	if (!rfbInitClient (cl, &argc, argv))
+	if (!rfbInitClient (cl, &argc, argv)) {
+    dpf_ax_close(dpf.dpfh);
 		return 1;
+	}
 
 
 	debug = true;
 	while (1) {
-//		DefaultLog("WaitForMessage\n");
-/*		
-		while (gtk_events_pending ())
-			gtk_main_iteration ();
-*/			
 		i = WaitForMessage (cl, 500);
 		if (debug) {
   		debug = false;
   	}
 		if (i < 0) {
-			DefaultLog("Exiting because i = %d\n", i);
+			ErrorLog("Exiting because i = %d\n", i);
+	    dpf_ax_close(dpf.dpfh);
 			return 1;
 		}
 		if (i)
 //		if (i && framebuffer_allocated == TRUE)
 			if (!HandleRFBServerMessage(cl)) {
-  			DefaultLog("Exiting because HandleRFBServerMessage() unhappy\n");
+  			ErrorLog("Exiting because HandleRFBServerMessage() unhappy\n");
+		    dpf_ax_close(dpf.dpfh);
 				return 2;
 			}
 	}
 
-//	gtk_main ();
-
+  dpf_ax_close(dpf.dpfh);
 	return 0;
 }
 
