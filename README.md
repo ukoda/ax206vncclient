@@ -1,6 +1,6 @@
 AX206 VNC Client
 ================
-I needed a lightweight VNC client program to drive AX206 3.5" USB LCD modules to display the LCD4Linux VNC server feeds.
+I needed a lightweight VNC client program to drive AX206 3.5" 480 x 320 USB LCD modules to display the LCD4Linux VNC server feeds.
 
 Being lazy I have simply forked the LibVNCServer library and added my needed client to the example clients directory.
 
@@ -8,7 +8,12 @@ The reset of this readme is from the upstream project.
 
 If you need gdb to work try "cmake -DCMAKE_BUILD_TYPE=Debug --build ." before the normal "cmake --build .".
 
-NB: This is a working progress.  While it builds ax206vncclient it is not functional yet.
+## Status
+The client program, ax206vncclient, builds and appears to work as intened.
+
+It has been tested on:
+- Rocky Linux
+- Mint Linux
 
 Original README
 ===============
