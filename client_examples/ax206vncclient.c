@@ -187,12 +187,6 @@ DPFAXHANDLE dpf_ax_open(const char *dev)
     }
 
     libusb_free_device_list(devs, 1);
-/*
-    r = libusb_detach_kernel_driver(u, 0);
-    DefaultLog("dpf_ax_open: libusb_detach_kernel_driver returned %d = %s = %s\n", r, libusb_error_name(r), libusb_strerror(r));
-    r = libusb_set_configuration(u, 0);
-    DefaultLog("dpf_ax_open: libusb_set_configuration returned %d = %s = %s\n", r, libusb_error_name(r), libusb_strerror(r));
-*/    
     r = libusb_claim_interface(u, 0);
     if (r < 0) {
         ErrorLog("dpf_ax_open: failed to claim usb device, error %d = %s = %s\n", r, libusb_error_name(r), libusb_strerror(r));
@@ -451,56 +445,14 @@ static rfbBool resize (rfbClient *client) {
 }
 
 
-#define PIXELS 480 * 320 * 4
-uint8_t diffbuf[PIXELS];
-
-static void showdiffs (uint8_t *buf) {
-    int pos;
-
-    for (pos = 0; pos < PIXELS; pos++) {
-        if (diffbuf[pos] != buf[pos]) {
-            DefaultLog("%06d %02x->%02x\n", pos, diffbuf[pos], buf[pos]);
-            diffbuf[pos] = buf[pos];
-        }
-    }
-}
-
 static void update (rfbClient *cl, int x, int y, int w, int h) {
-//	DefaultLog("update x=%d, y=%d, w=%d, h=%d\n", x, y, w, h);
-//    showdiffs(cl->frameBuffer);
-/*
-	DefaultLog("frameBuffer: %02x %02x %02x %02x %02x %02x %02x %02x\n",
-	  cl->frameBuffer[490], cl->frameBuffer[491], cl->frameBuffer[492], cl->frameBuffer[493],
-	  cl->frameBuffer[494], cl->frameBuffer[495], cl->frameBuffer[496], cl->frameBuffer[497]);
-//	  cl->frameBuffer[0], cl->frameBuffer[1], cl->frameBuffer[2], cl->frameBuffer[3],
-//	  cl->frameBuffer[4], cl->frameBuffer[5], cl->frameBuffer[6], cl->frameBuffer[7]);
-*/      
-/*	
-	DefaultLog("buffer: %02x %02x %02x %02x %02x %02x %02x %02x\n",
-	  cl->buffer[0], cl->buffer[1], cl->buffer[2], cl->buffer[3], cl->buffer[4], cl->buffer[5], cl->buffer[6], cl->buffer[7]);
-*/	  
-
     int lx, ly;
-    int tmp;
     RGBA pixel;
-    RGBA pixelAlt;
 
-    pixel.R = 0x00;
-    pixel.G = 0x00;
-    pixel.B = 0xff;
-    pixel.A = 0x80;
-/*    
-    pixelAlt.R = 0xff;
-    pixelAlt.G = 0xff;
-    pixelAlt.B = 0x00;
-    pixelAlt.A = 0x80;
-*/
     // Set pixels one by one
     // Note: here is room for optimization :-)
     for (ly = y; ly < y + h; ly++)
         for (lx = x; lx < x + w; lx++) {
-//            tmp = ly * dpf.pwidth + lx;
-//            drv_set_pixel(x, y, drv_generic_graphic_rgb(y, x));
             pixel.R = cl->frameBuffer[(ly * dpf.pwidth + lx) * 4];
             pixel.G = cl->frameBuffer[(ly * dpf.pwidth + lx) * 4 + 1];
             pixel.B = cl->frameBuffer[(ly * dpf.pwidth + lx) * 4 + 2];
@@ -527,7 +479,6 @@ static void update (rfbClient *cl, int x, int y, int w, int h) {
     rect[1] = dpf.miny;
     rect[2] = dpf.maxx + 1;
     rect[3] = dpf.maxy + 1;
-    DefaultLog("blit %03d %03d %03d %03d\n", rect[0], rect[1], rect[2], rect[3]);
     dpf_ax_screen_blit(dpf.dpfh, dpf.xferBuf, rect);
 
     // Reset dirty rectangle
@@ -594,7 +545,7 @@ int main (int argc, char *argv[])
         DefaultLog("Usage:\n");
         DefaultLog("%s dpf server\n", argv[0]);
         DefaultLog("e.g:\n");
-        DefaultLog("%s usb0 server.domain\n", argv[0]);
+        DefaultLog("%s usb0 server.domain:port\n", argv[0]);
         return -1;
     }
 
@@ -627,30 +578,11 @@ int main (int argc, char *argv[])
     vncargc = argc - 1;
     vncargv = &argv[1];
 
-//	GdkImage *image;
 
     rfbClientLog = DefaultLog;
     rfbClientErr = ErrorLog;
 
-//	gtk_init (&argc, &argv);
-
-	/* create a dummy image just to make use of its properties */
-/*	
-	image = gdk_image_new (GDK_IMAGE_FASTEST, gdk_visual_get_system(),
-				200, 100);
-*/
 	cl = rfbGetClient (8, 3, 4);  // TODO: Work out the correct values we need
-/*
-	cl->format.redShift     = image->visual->red_shift;
-	cl->format.greenShift   = image->visual->green_shift;
-	cl->format.blueShift    = image->visual->blue_shift;
-
-	cl->format.redMax   = (1 << image->visual->red_prec) - 1;
-	cl->format.greenMax = (1 << image->visual->green_prec) - 1;
-	cl->format.blueMax  = (1 << image->visual->blue_prec) - 1;
-
-	g_object_unref (image);
-*/
 	cl->MallocFrameBuffer = resize;
 	cl->canHandleNewFBSize = FALSE;
 	cl->GotFrameBufferUpdate = update;
@@ -679,7 +611,6 @@ int main (int argc, char *argv[])
        return 1;
    }
    if (i)
-//		if (i && framebuffer_allocated == TRUE)
        if (!HandleRFBServerMessage(cl)) {
          ErrorLog("Exiting because HandleRFBServerMessage() unhappy\n");
          dpf_ax_close(dpf.dpfh);
@@ -690,4 +621,3 @@ int main (int argc, char *argv[])
  dpf_ax_close(dpf.dpfh);
  return 0;
 }
-
