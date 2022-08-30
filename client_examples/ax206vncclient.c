@@ -74,16 +74,16 @@ static struct {
     int pheight;                // Physical display height
 
     // Flags to translate logical to physical orientation
-    int isPortrait;
-    int rotate90;
-    int flip;
+//    int isPortrait;
+//    int rotate90;
+//    int flip;
 
     // Current dirty rectangle
     int minx, maxx;
     int miny, maxy;
 
     // Config properties
-    int orientation;
+//    int orientation;
     int backlight;
 } dpf;
 
@@ -235,6 +235,56 @@ void dpf_ax_close(DPFAXHANDLE h)
     libusb_release_interface(dpf->udev, 0);
     libusb_close(dpf->udev);
     free(dpf);
+}
+
+
+// Convert RGBA pixel to RGB565 pixel(s)
+
+#define _RGB565_0(p) (( ((p.R) & 0xf8)      ) | (((p.G) & 0xe0) >> 5))
+#define _RGB565_1(p) (( ((p.G) & 0x1c) << 3 ) | (((p.B) & 0xf8) >> 3))
+
+/*
+ * Set one pixel in lcdBuf.
+ * 
+ * Respects orientation and updates dirty rectangle.
+ *
+ * in:  x, y - pixel coordinates
+ *  pix  - RGBA pixel value
+ * out: -
+ */
+static void drv_set_pixel(int x, int y, RGBA pix)
+{
+    int changed = 0;
+
+    int sx = DCOLS;
+    int sy = DROWS;
+    int lx = x % sx;
+    int ly = y % sy;
+
+    if (lx < 0 || lx >= (int) dpf.pwidth || ly < 0 || ly >= (int) dpf.pheight) {
+        ErrorLog("dpf: x/y out of bounds (x=%d, y=%d, lx=%d, ly=%d)\n", x, y, lx, ly);
+        return;
+    }
+
+    unsigned char c1 = _RGB565_0(pix);
+    unsigned char c2 = _RGB565_1(pix);
+    unsigned int i = (ly * dpf.pwidth + lx) * DPF_BPP;
+    if (dpf.lcdBuf[i] != c1 || dpf.lcdBuf[i + 1] != c2) {
+        dpf.lcdBuf[i] = c1;
+        dpf.lcdBuf[i + 1] = c2;
+        changed = 1;
+    }
+
+    if (changed) {
+        if (lx < dpf.minx)
+            dpf.minx = lx;
+        if (lx > dpf.maxx)
+            dpf.maxx = lx;
+        if (ly < dpf.miny)
+            dpf.miny = ly;
+        if (ly > dpf.maxy)
+            dpf.maxy = ly;
+    }
 }
 
 
@@ -401,10 +451,24 @@ static rfbBool resize (rfbClient *client) {
 }
 
 
+#define PIXELS 480 * 320 * 4
+uint8_t diffbuf[PIXELS];
+
+static void showdiffs (uint8_t *buf) {
+    int pos;
+
+    for (pos = 0; pos < PIXELS; pos++) {
+        if (diffbuf[pos] != buf[pos]) {
+            DefaultLog("%06d %02x->%02x\n", pos, diffbuf[pos], buf[pos]);
+            diffbuf[pos] = buf[pos];
+        }
+    }
+}
 
 static void update (rfbClient *cl, int x, int y, int w, int h) {
+//	DefaultLog("update x=%d, y=%d, w=%d, h=%d\n", x, y, w, h);
+//    showdiffs(cl->frameBuffer);
 /*
-	DefaultLog("*** update x=%d, y=%d, w=%d, h=%d ***\n", x, y, w, h);
 	DefaultLog("frameBuffer: %02x %02x %02x %02x %02x %02x %02x %02x\n",
 	  cl->frameBuffer[490], cl->frameBuffer[491], cl->frameBuffer[492], cl->frameBuffer[493],
 	  cl->frameBuffer[494], cl->frameBuffer[495], cl->frameBuffer[496], cl->frameBuffer[497]);
@@ -416,24 +480,61 @@ static void update (rfbClient *cl, int x, int y, int w, int h) {
 	  cl->buffer[0], cl->buffer[1], cl->buffer[2], cl->buffer[3], cl->buffer[4], cl->buffer[5], cl->buffer[6], cl->buffer[7]);
 */	  
 
-/*
-	if (dialog_connecting != NULL) {
-		gtk_widget_destroy (dialog_connecting);
-		dialog_connecting = NULL;
-	}
+    int lx, ly;
+    int tmp;
+    RGBA pixel;
+    RGBA pixelAlt;
 
-	GtkWidget *drawing_area = rfbClientGetClientData (cl, gtk_init);
+    pixel.R = 0x00;
+    pixel.G = 0x00;
+    pixel.B = 0xff;
+    pixel.A = 0x80;
+/*    
+    pixelAlt.R = 0xff;
+    pixelAlt.G = 0xff;
+    pixelAlt.B = 0x00;
+    pixelAlt.A = 0x80;
+*/
+    // Set pixels one by one
+    // Note: here is room for optimization :-)
+    for (ly = y; ly < y + h; ly++)
+        for (lx = x; lx < x + w; lx++) {
+//            tmp = ly * dpf.pwidth + lx;
+//            drv_set_pixel(x, y, drv_generic_graphic_rgb(y, x));
+            pixel.R = cl->frameBuffer[(ly * dpf.pwidth + lx) * 4];
+            pixel.G = cl->frameBuffer[(ly * dpf.pwidth + lx) * 4 + 1];
+            pixel.B = cl->frameBuffer[(ly * dpf.pwidth + lx) * 4 + 2];
+            drv_set_pixel(lx, ly, pixel);
+        }
 
-	if (drawing_area != NULL)
-		gtk_widget_queue_draw_area (drawing_area, x, y, w, h);
-*/		
+    // If nothing has changed, skip transfer
+    if (dpf.minx > dpf.maxx || dpf.miny > dpf.maxy)
+        return;
+
+    // Copy data in dirty rectangle from data buffer to temp transfer buffer
+    unsigned int cpylength = (dpf.maxx - dpf.minx + 1) * DPF_BPP;
+    unsigned char *ps = dpf.lcdBuf + (dpf.miny * dpf.pwidth + dpf.minx) * DPF_BPP;
+    unsigned char *pd = dpf.xferBuf;
+    for (ly = dpf.miny; ly <= dpf.maxy; ly++) {
+        memcpy(pd, ps, cpylength);
+        ps += dpf.pwidth * DPF_BPP;
+        pd += cpylength;
+    }
+
+    // Send the buffer
     short rect[4];
+    rect[0] = dpf.minx;
+    rect[1] = dpf.miny;
+    rect[2] = dpf.maxx + 1;
+    rect[3] = dpf.maxy + 1;
+    DefaultLog("blit %03d %03d %03d %03d\n", rect[0], rect[1], rect[2], rect[3]);
+    dpf_ax_screen_blit(dpf.dpfh, dpf.xferBuf, rect);
 
-    rect[0] = x;
-    rect[1] = y;
-    rect[2] = x+w;
-    rect[3] = y+h;
-    dpf_ax_screen_blit(dpf.dpfh, cl->frameBuffer, rect);
+    // Reset dirty rectangle
+    dpf.minx = dpf.pwidth - 1;
+    dpf.maxx = 0;
+    dpf.miny = dpf.pheight - 1;
+    dpf.maxy = 0;
 
 }
 
@@ -502,6 +603,26 @@ int main (int argc, char *argv[])
         ErrorLog("dpf: cannot open dpf device %s\n", argv[1]);
         return -1;
     }
+
+    // Get dpfs physical dimensions
+//    dpf.pwidth = dpf_ax_getwidth(dpf.dpfh);
+//    dpf.pheight = dpf_ax_getheight(dpf.dpfh);
+    dpf.pwidth = 480;
+    dpf.pheight = 320;
+
+    // allocate display buffer + temp transfer buffer
+    dpf.lcdBuf = malloc(dpf.pwidth * dpf.pheight * DPF_BPP);
+    dpf.xferBuf = malloc(dpf.pwidth * dpf.pheight * DPF_BPP);
+
+    // clear display buffer + set it to "dirty"
+    memset(dpf.lcdBuf, 0, dpf.pwidth * dpf.pheight * DPF_BPP);  //Black
+    dpf.minx = 0;
+    dpf.maxx = dpf.pwidth - 1;
+    dpf.miny = 0;
+    dpf.maxy = dpf.pheight - 1;
+    // set the logical width/height for lcd4linux
+    DROWS = dpf.pheight;
+    DCOLS = dpf.pwidth;
 
     vncargc = argc - 1;
     vncargv = &argv[1];
