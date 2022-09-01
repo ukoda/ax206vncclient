@@ -14,6 +14,7 @@ The client program, ax206vncclient, builds and appears to work as intened.
 It has been tested on:
 - Rocky Linux
 - Mint Linux
+- RasberryPi Zero W (32 bit)
 
 Original README
 ===============
